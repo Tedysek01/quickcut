@@ -75,23 +75,55 @@ def render_captions(
     # Group words into lines
     lines = _group_words_into_lines(clip_words, config.maxWordsPerLine)
 
+    animation = getattr(config, "animation", "none") or "none"
+    highlight_color = getattr(config, "highlightColor", config.primaryColor) or config.primaryColor
+
     # Build filter for each line group
     drawtext_filters = []
     for line_words, line_start, line_end in lines:
-        text = " ".join(w.word for w in line_words)
-        # Escape special characters for FFmpeg
-        text = _escape_ffmpeg_text(text)
+        if animation == "word_by_word":
+            # One drawtext per LINE with compound fontcolor_expr for per-word highlighting.
+            # This reduces N filters by maxWordsPerLine factor (~4x), avoiding ARG_MAX.
+            line_text = " ".join(w.word for w in line_words)
+            line_text = _escape_ffmpeg_text(line_text)
 
-        drawtext = (
-            f"drawtext=text='{text}'"
-            f":fontsize={font_size}"
-            f":fontcolor={config.primaryColor}"
-            f":x=(w-text_w)/2"
-            f":y={y_position}"
-            f":enable='between(t,{line_start:.2f},{line_end:.2f})'"
-            f":shadowcolor=black:shadowx=2:shadowy=2"
-        )
-        drawtext_filters.append(drawtext)
+            # Build nested if(between(...)) for word-level color switching
+            hl = _escape_ffmpeg_text(highlight_color)
+            primary = _escape_ffmpeg_text(config.primaryColor)
+            # Start from the innermost default (primary color) and wrap outward
+            fontcolor_expr = primary
+            for w in reversed(line_words):
+                fontcolor_expr = (
+                    f"if(between(t\\,{w.start:.2f}\\,{w.end:.2f})"
+                    f"\\,{hl}"
+                    f"\\,{fontcolor_expr})"
+                )
+
+            drawtext = (
+                f"drawtext=text='{line_text}'"
+                f":fontsize={font_size}"
+                f":fontcolor_expr='{fontcolor_expr}'"
+                f":x=(w-text_w)/2"
+                f":y={y_position}"
+                f":enable='between(t,{line_start:.2f},{line_end:.2f})'"
+                f":borderw=2:bordercolor=black"
+            )
+            drawtext_filters.append(drawtext)
+        else:
+            # Static text for "none", "line_by_line", "fade" modes
+            text = " ".join(w.word for w in line_words)
+            text = _escape_ffmpeg_text(text)
+
+            drawtext = (
+                f"drawtext=text='{text}'"
+                f":fontsize={font_size}"
+                f":fontcolor={config.primaryColor}"
+                f":x=(w-text_w)/2"
+                f":y={y_position}"
+                f":enable='between(t,{line_start:.2f},{line_end:.2f})'"
+                f":borderw=2:bordercolor=black"
+            )
+            drawtext_filters.append(drawtext)
 
     if not drawtext_filters:
         subprocess.run([

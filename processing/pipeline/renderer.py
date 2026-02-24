@@ -7,6 +7,7 @@ from typing import List, Optional
 from models.edit_config import EditConfig, CutConfig, ZoomConfig, SegmentConfig
 from models.transcript import Word
 from pipeline.captions import render_captions
+from pipeline.annotations import build_annotation_filters
 from pipeline.time_map import TimeMap
 
 logger = logging.getLogger(__name__)
@@ -263,8 +264,71 @@ def _concat_segments(video_path: str, keep_segments: List[tuple], output_path: s
     return output_path
 
 
+def _easing_expr(t_expr: str, easing: str) -> str:
+    """Generate an FFmpeg expression that applies easing to a 0-1 progress value.
+
+    Maps easing types to equivalent FFmpeg filter expressions using
+    pow() and if() — matches the browser-side easings in animation.ts.
+    """
+    if easing == "ease_in":
+        return f"pow({t_expr},3)"
+    elif easing == "ease_in_out":
+        return (
+            f"if(lt({t_expr},0.5),"
+            f"4*pow({t_expr},3),"
+            f"1-pow(-2*{t_expr}+2,3)/2)"
+        )
+    elif easing == "snap":
+        return f"if(lt({t_expr},0.5),0,1)"
+    else:
+        # "linear" or unknown — identity
+        return t_expr
+
+
+def _build_transition_aware_time_map(segments: List[SegmentConfig]) -> TimeMap:
+    """Build a TimeMap that accounts for xfade transition overlap.
+
+    When xfade transitions overlap segments, the output is shorter than
+    the sum of segment durations. Each transition of duration T causes
+    T seconds of overlap between consecutive segments in the output.
+    This must match the offset logic in _concat_segments_with_transitions().
+    """
+    from pipeline.time_map import Segment as TMSegment
+
+    if not segments:
+        return TimeMap.from_keep_segments([])
+
+    sorted_segs = sorted(segments, key=lambda s: s.sourceStart)
+    durations = [s.sourceEnd - s.sourceStart for s in sorted_segs]
+    tm_segments = []
+    running_dur = durations[0]
+
+    # First segment always starts at output time 0
+    tm_segments.append(TMSegment(sorted_segs[0].sourceStart, sorted_segs[0].sourceEnd, 0.0))
+
+    for i in range(1, len(sorted_segs)):
+        seg = sorted_segs[i]
+        trans_dur = 0.0
+        if seg.transition not in ("none", "hard", ""):
+            trans_dur = getattr(seg, "transitionDuration", 0.3) or 0.3
+            # Clamp exactly as _concat_segments_with_transitions does
+            trans_dur = min(trans_dur, durations[i] * 0.5, running_dur * 0.5)
+
+        # Output start = running_dur minus transition overlap
+        output_start = running_dur - trans_dur
+        tm_segments.append(TMSegment(seg.sourceStart, seg.sourceEnd, output_start))
+
+        # Update running_dur to match FFmpeg's xfade offset math
+        if trans_dur > 0:
+            running_dur = output_start + durations[i]
+        else:
+            running_dur += durations[i]
+
+    return TimeMap(tm_segments)
+
+
 def apply_zooms(video_path: str, zooms: List[ZoomConfig], output_path: str) -> str:
-    """Apply zoom keyframes to video using FFmpeg scale+crop."""
+    """Apply zoom keyframes to video using FFmpeg scale+crop with easing."""
     if not zooms:
         subprocess.run([
             "ffmpeg", "-i", video_path, "-c", "copy", "-y", output_path,
@@ -275,26 +339,39 @@ def apply_zooms(video_path: str, zooms: List[ZoomConfig], output_path: str) -> s
     width, height = info["width"], info["height"]
 
     # Build a single zoom expression that combines all zoom keyframes.
-    # Each zoom: between(t, start, end) → interpolated scale, else 1.0
+    # Each zoom: between(t, start, end) → eased scale envelope, else 1.0
     # We nest them so the last zoom takes priority if overlapping.
     zoom_expr = "1.0"
+
+    # Also build per-zoom anchor expressions for crop positioning
+    anchor_x_expr = str(zooms[0].anchorX if zooms else 0.5)
+    anchor_y_expr = str(zooms[0].anchorY if zooms else 0.4)
 
     for zoom in zooms:
         t_start = zoom.time
         t_end = zoom.time + zoom.duration
         t_mid = zoom.time + zoom.duration / 2
         scale = zoom.scale
+        easing = getattr(zoom, "easing", "linear") or "linear"
 
-        # Smooth ramp: scale up to midpoint, then scale back down
-        # Using linear interpolation for reliability
+        # Clamp anchor so viewport stays within frame bounds
+        half = 0.5 / scale if scale > 0 else 0.5
+        ax = max(half, min(1 - half, zoom.anchorX))
+        ay = max(half, min(1 - half, zoom.anchorY))
+
         half_dur = zoom.duration / 2
         if half_dur > 0:
-            # Ramp up: lerp from 1.0 to scale over first half
-            ramp_up = f"1.0+({scale}-1.0)*(t-{t_start:.3f})/{half_dur:.3f}"
-            # Ramp down: lerp from scale to 1.0 over second half
-            ramp_down = f"{scale}-({scale}-1.0)*(t-{t_mid:.3f})/{half_dur:.3f}"
-            # Pick ramp based on which half we're in
-            smooth = f"if(lt(t,{t_mid:.3f}),{ramp_up},{ramp_down})"
+            # Triangle envelope: 0→1→0 over the zoom duration
+            # First half: progress = (t - start) / half_dur
+            # Second half: progress = (end - t) / half_dur
+            triangle_expr = (
+                f"if(lt(t,{t_mid:.3f}),"
+                f"(t-{t_start:.3f})/{half_dur:.3f},"
+                f"({t_end:.3f}-t)/{half_dur:.3f})"
+            )
+            # Apply easing to the triangle envelope
+            eased_expr = _easing_expr(triangle_expr, easing)
+            smooth = f"1.0+({scale}-1.0)*{eased_expr}"
         else:
             smooth = str(scale)
 
@@ -303,16 +380,19 @@ def apply_zooms(video_path: str, zooms: List[ZoomConfig], output_path: str) -> s
             f"{smooth},{zoom_expr})"
         )
 
-    # Apply zoom: scale the video up, then crop back to original dimensions.
-    # The anchor point determines where the crop centers.
-    # Default anchor: (0.5, 0.4) = center-ish, slightly above for face focus.
-    # For simplicity, use the first zoom's anchor for all (most videos have consistent framing).
-    anchor_x = zooms[0].anchorX if zooms else 0.5
-    anchor_y = zooms[0].anchorY if zooms else 0.4
+        # Per-zoom anchor: when active, use this zoom's clamped anchor
+        anchor_x_expr = (
+            f"if(between(t,{t_start:.3f},{t_end:.3f}),"
+            f"{ax:.2f},{anchor_x_expr})"
+        )
+        anchor_y_expr = (
+            f"if(between(t,{t_start:.3f},{t_end:.3f}),"
+            f"{ay:.2f},{anchor_y_expr})"
+        )
 
-    # crop x/y: center the crop on the anchor point
-    crop_x = f"(iw-{width})*{anchor_x:.2f}"
-    crop_y = f"(ih-{height})*{anchor_y:.2f}"
+    # Crop x/y: center the crop on the per-zoom anchor point
+    crop_x = f"(iw-{width})*({anchor_x_expr})"
+    crop_y = f"(ih-{height})*({anchor_y_expr})"
 
     filter_str = (
         f"scale='iw*({zoom_expr})':'ih*({zoom_expr})':flags=bilinear,"
@@ -522,11 +602,21 @@ def render_clip(
     extract_clip(video_path, clip_start, clip_end, step1)
     current = step1
 
-    # Build TimeMap - prefer segments (NLE editor) over cuts (legacy)
+    # Build TimeMap - prefer segments (NLE editor) over cuts (legacy).
+    # When segments use xfade transitions, the output is shorter due to
+    # overlap — use a transition-aware TimeMap so zoom/caption times align.
     clip_duration = clip_end - clip_start
     if edit_config.segments:
-        keep_segs = [(s.sourceStart, s.sourceEnd) for s in edit_config.segments]
-        time_map = TimeMap.from_keep_segments(keep_segs)
+        has_transitions = any(
+            s.transition not in ("none", "hard", "")
+            for s in edit_config.segments[1:]
+        ) if len(edit_config.segments) > 1 else False
+
+        if has_transitions:
+            time_map = _build_transition_aware_time_map(edit_config.segments)
+        else:
+            keep_segs = [(s.sourceStart, s.sourceEnd) for s in edit_config.segments]
+            time_map = TimeMap.from_keep_segments(keep_segs)
     else:
         time_map = TimeMap.from_cuts(edit_config.cuts, clip_duration)
 
@@ -583,6 +673,29 @@ def render_clip(
                 )
             except Exception as e:
                 logger.warning(f"Captions step failed: {e}")
+
+    # 5b. Apply text annotations (if any)
+    annotations = getattr(edit_config, "annotations", []) or []
+    if annotations:
+        ann_info = _get_video_info(current)
+        ann_filter = build_annotation_filters(
+            annotations, ann_info["width"], ann_info["height"]
+        )
+        if ann_filter:
+            step5b = os.path.join(tmp_dir, "05b_annotations.mp4")
+            try:
+                result = subprocess.run([
+                    "ffmpeg", "-i", current,
+                    "-vf", ann_filter,
+                    "-c:a", "copy",
+                    "-y", step5b,
+                ], capture_output=True, text=True)
+                if result.returncode == 0:
+                    current = step5b
+                else:
+                    logger.warning(f"Annotations step failed: {result.stderr[-300:]}")
+            except Exception as e:
+                logger.warning(f"Annotations step failed: {e}")
 
     # 6. Normalize audio
     if edit_config.audio.normalizeVolume:

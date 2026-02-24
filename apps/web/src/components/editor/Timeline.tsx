@@ -5,6 +5,8 @@ import { useEditorStore } from "@/stores/editorStore";
 import type { SegmentConfig, ZoomConfig } from "@/types/editConfig";
 import { Scissors, Plus, Trash2 } from "lucide-react";
 import AudioWaveform from "./AudioWaveform";
+import { extractThumbnails } from "@/lib/editor/thumbnailExtractor";
+import TransitionPopover from "./TransitionPopover";
 
 /**
  * Multi-track NLE Timeline with drag interactions, snap-to-grid,
@@ -54,6 +56,11 @@ export default function Timeline() {
   const [dragPreviewTime, setDragPreviewTime] = useState<number | null>(null);
   const [snappedPoint, setSnappedPoint] = useState<number | null>(null);
   const dragStartXRef = useRef(0);
+  const [transitionPopover, setTransitionPopover] = useState<{
+    segmentId: string;
+    x: number;
+    y: number;
+  } | null>(null);
 
   const {
     editConfig,
@@ -70,11 +77,29 @@ export default function Timeline() {
     addZoom,
     updateZoom,
     deleteZoom,
+    addAnnotation,
+    deleteAnnotation,
     setTimelineZoom,
     sourceVideos,
   } = useEditorStore();
 
   const clipDuration = clipEnd - clipStart;
+  const { proxyVideoUrl, sourceVideoUrl, useProxy } = useEditorStore();
+  const [thumbnails, setThumbnails] = useState<Map<number, string>>(new Map());
+
+  // Extract filmstrip thumbnails when video URL changes
+  const videoUrlForThumbs = useProxy ? proxyVideoUrl : sourceVideoUrl;
+  useEffect(() => {
+    if (!videoUrlForThumbs || clipDuration <= 0) return;
+    let cancelled = false;
+    extractThumbnails(videoUrlForThumbs, 0, clipDuration, 2).then((thumbs) => {
+      if (cancelled) return;
+      const map = new Map<number, string>();
+      for (const t of thumbs) map.set(t.time, t.dataUrl);
+      setThumbnails(map);
+    });
+    return () => { cancelled = true; };
+  }, [videoUrlForThumbs, clipDuration]);
 
   // Convert output time to pixel position
   const timeToX = useCallback(
@@ -335,6 +360,9 @@ export default function Timeline() {
         } else if (sel.type === "zoom") {
           deleteZoom(sel.id);
           selectElement(null);
+        } else if (sel.type === "annotation") {
+          deleteAnnotation(sel.id);
+          selectElement(null);
         }
       }
     };
@@ -362,6 +390,10 @@ export default function Timeline() {
     addZoom(currentTime);
   }, [currentTime, addZoom]);
 
+  const handleAddAnnotation = useCallback(() => {
+    addAnnotation(currentTime);
+  }, [currentTime, addAnnotation]);
+
   const handleDeleteSelected = useCallback(() => {
     const sel = selectedElement;
     if (!sel) return;
@@ -374,8 +406,11 @@ export default function Timeline() {
     } else if (sel.type === "zoom") {
       deleteZoom(sel.id);
       selectElement(null);
+    } else if (sel.type === "annotation") {
+      deleteAnnotation(sel.id);
+      selectElement(null);
     }
-  }, [selectedElement, editConfig?.segments, deleteSegment, deleteZoom, selectElement]);
+  }, [selectedElement, editConfig?.segments, deleteSegment, deleteZoom, deleteAnnotation, selectElement]);
 
   const handleWheel = useCallback(
     (e: React.WheelEvent) => {
@@ -394,7 +429,8 @@ export default function Timeline() {
   const canDeleteSelected =
     selectedElement &&
     ((selectedElement.type === "segment" && (editConfig.segments?.length || 0) > 1) ||
-      selectedElement.type === "zoom");
+      selectedElement.type === "zoom" ||
+      selectedElement.type === "annotation");
 
   return (
     <div
@@ -430,6 +466,16 @@ export default function Timeline() {
             title="Add zoom at playhead"
           >
             <Plus className="h-3 w-3" /> Zoom
+          </button>
+          <button
+            onClick={handleAddAnnotation}
+            className="flex items-center gap-1 px-2 py-1 rounded text-xs transition-colors"
+            style={{ color: "var(--text-secondary)" }}
+            onMouseEnter={(e) => (e.currentTarget.style.background = "var(--bg-elevated)")}
+            onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
+            title="Add text annotation at playhead"
+          >
+            <Plus className="h-3 w-3" /> Text
           </button>
           {canDeleteSelected && (
             <button
@@ -584,17 +630,61 @@ export default function Timeline() {
                         />
                       )}
 
-                      {/* Transition indicator diamond between segments */}
+                      {/* Hover marker to add transition where none exists */}
+                      {!hasTransition && idx > 0 && prevSeg && (
+                        <div
+                          className="absolute z-10 flex items-center justify-center opacity-0 hover:opacity-100 transition-opacity cursor-pointer"
+                          style={{
+                            left: `${seg.left - 6}px`,
+                            top: "4px",
+                            width: "12px",
+                            height: "12px",
+                          }}
+                          title="Click to add transition"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                            const timelineRect = timelineRef.current?.getBoundingClientRect();
+                            setTransitionPopover({
+                              segmentId: seg.id,
+                              x: rect.left - (timelineRect?.left ?? 0),
+                              y: rect.bottom - (timelineRect?.top ?? 0) + 4,
+                            });
+                          }}
+                        >
+                          <div
+                            style={{
+                              width: "8px",
+                              height: "8px",
+                              background: "rgba(139, 92, 246, 0.4)",
+                              transform: "rotate(45deg)",
+                              borderRadius: "1px",
+                            }}
+                          />
+                        </div>
+                      )}
+
+                      {/* Transition indicator diamond between segments — click to edit */}
                       {hasTransition && prevSeg && (
                         <div
-                          className="absolute z-10 flex items-center justify-center"
+                          className="absolute z-10 flex items-center justify-center cursor-pointer"
                           style={{
                             left: `${seg.left - 8}px`,
                             top: "2px",
                             width: "16px",
                             height: "16px",
                           }}
-                          title={`Transition: ${seg.transition} (${(seg.transitionDuration ?? 0.3).toFixed(1)}s)`}
+                          title={`Transition: ${seg.transition} (${(seg.transitionDuration ?? 0.3).toFixed(1)}s) — click to edit`}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                            const timelineRect = timelineRef.current?.getBoundingClientRect();
+                            setTransitionPopover({
+                              segmentId: seg.id,
+                              x: rect.left - (timelineRect?.left ?? 0),
+                              y: rect.bottom - (timelineRect?.top ?? 0) + 4,
+                            });
+                          }}
                         >
                           {/* Diamond background */}
                           <div
@@ -619,7 +709,7 @@ export default function Timeline() {
 
                       {/* Segment block */}
                       <div
-                        className={`absolute top-0.5 rounded transition-colors ${
+                        className={`absolute top-0.5 rounded transition-colors overflow-hidden ${
                           isSelected ? "ring-2 ring-[var(--accent)]" : ""
                         }`}
                         style={{
@@ -641,6 +731,26 @@ export default function Timeline() {
                           }
                         }}
                       >
+                        {/* Filmstrip thumbnails */}
+                        {thumbnails.size > 0 && (
+                          <div className="absolute inset-0 flex pointer-events-none" style={{ opacity: isSelected ? 0.3 : 0.6 }}>
+                            {Array.from(thumbnails.entries())
+                              .filter(([t]) => t >= seg.sourceStart && t < seg.sourceEnd)
+                              .map(([t, dataUrl]) => {
+                                const offsetInSeg = t - seg.sourceStart;
+                                const leftPx = timeToX(offsetInSeg);
+                                return (
+                                  <img
+                                    key={t}
+                                    src={dataUrl}
+                                    alt=""
+                                    className="absolute top-0 h-full object-cover"
+                                    style={{ left: `${leftPx}px`, width: `${timeToX(2)}px` }}
+                                  />
+                                );
+                              })}
+                          </div>
+                        )}
                         {/* Left edge drag handle */}
                         <div
                           className="absolute left-0 top-0 bottom-0 z-10 group"
@@ -747,6 +857,68 @@ export default function Timeline() {
               </div>
             </div>
 
+            {/* Annotation Track */}
+            {(editConfig.annotations?.length ?? 0) > 0 && (
+              <div
+                className="flex items-center border-b"
+                style={{ borderColor: "var(--border)", height: "26px" }}
+              >
+                <div
+                  className="flex-shrink-0 px-2 text-[10px] uppercase tracking-wider"
+                  style={{ width: `${TRACK_LABEL_WIDTH}px`, color: "var(--text-disabled)" }}
+                >
+                  Annot
+                </div>
+                <div
+                  className="relative flex-1"
+                  style={{ height: "20px" }}
+                  onClick={handleTimelineClick}
+                >
+                  {editConfig.annotations.map((ann) => {
+                    const isSelected =
+                      selectedElement?.type === "annotation" && selectedElement.id === ann.id;
+                    const left = timeToX(ann.startTime);
+                    const width = timeToX(ann.endTime - ann.startTime);
+                    return (
+                      <div
+                        key={ann.id}
+                        className={`absolute top-0.5 rounded transition-colors ${
+                          isSelected ? "ring-1 ring-[var(--accent)]" : ""
+                        }`}
+                        style={{
+                          left: `${left}px`,
+                          width: `${Math.max(width, 8)}px`,
+                          height: "14px",
+                          background: isSelected
+                            ? "var(--accent)"
+                            : "rgba(236, 72, 153, 0.35)",
+                          border: isSelected
+                            ? undefined
+                            : "1px solid rgba(236, 72, 153, 0.5)",
+                          cursor: "pointer",
+                        }}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          selectElement({ type: "annotation" as any, id: ann.id });
+                        }}
+                        title={ann.content}
+                      >
+                        <span
+                          className="px-1 text-[8px] truncate block"
+                          style={{
+                            color: isSelected ? "#000" : "var(--text-primary)",
+                            lineHeight: "14px",
+                          }}
+                        >
+                          {ann.content}
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
             {/* Audio Waveform Track */}
             <div
               className="flex items-center border-b"
@@ -804,6 +976,21 @@ export default function Timeline() {
               </div>
             </div>
           </div>
+
+          {/* Transition popover */}
+          {transitionPopover && editConfig && (() => {
+            const seg = editConfig.segments.find((s) => s.id === transitionPopover.segmentId);
+            if (!seg) return null;
+            return (
+              <TransitionPopover
+                segmentId={transitionPopover.segmentId}
+                currentTransition={seg.transition}
+                currentDuration={seg.transitionDuration ?? 0.3}
+                position={{ x: transitionPopover.x, y: transitionPopover.y }}
+                onClose={() => setTransitionPopover(null)}
+              />
+            );
+          })()}
 
           {/* Time ruler */}
           <div

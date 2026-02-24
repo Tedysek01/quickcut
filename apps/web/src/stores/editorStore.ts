@@ -9,7 +9,7 @@
  */
 
 import { create } from "zustand";
-import type { EditConfig, SegmentConfig, ZoomConfig, CaptionConfig, CaptionOverride } from "@/types/editConfig";
+import type { EditConfig, SegmentConfig, ZoomConfig, CaptionConfig, CaptionOverride, AnnotationConfig, AnnotationStyle } from "@/types/editConfig";
 import type { Clip } from "@/types/clip";
 import type { Project, Word, SourceVideo } from "@/types/project";
 import { segmentsToCuts } from "@/lib/editor/segments";
@@ -21,10 +21,10 @@ import {
 
 // ---- Types ----
 
-export type SelectedElementType = "segment" | "caption" | "zoom" | null;
+export type SelectedElementType = "segment" | "caption" | "zoom" | "annotation" | null;
 
 export interface SelectedElement {
-  type: "segment" | "caption" | "zoom";
+  type: "segment" | "caption" | "zoom" | "annotation";
   id: string;
   index?: number;
 }
@@ -75,6 +75,7 @@ interface EditorState {
   toggleProxy: () => void;
   setPlaybackState: (isPlaying: boolean, currentTime: number, totalDuration: number) => void;
   updateEditConfig: (changes: Partial<EditConfig>) => void;
+  updateEditConfigDebounced: (changes: Partial<EditConfig>) => void;
   undo: () => void;
   redo: () => void;
   selectElement: (element: SelectedElement | null) => void;
@@ -98,16 +99,36 @@ interface EditorState {
   toggleWordHighlight: (wordIndex: number) => void;
   hideWord: (wordIndex: number) => void;
   updateCaptionStyle: (changes: Partial<CaptionConfig>) => void;
+
+  // Annotation actions
+  addAnnotation: (time: number) => void;
+  updateAnnotation: (id: string, changes: Partial<AnnotationConfig>) => void;
+  deleteAnnotation: (id: string) => void;
 }
 
 // ---- Helpers ----
 
 const MAX_HISTORY = 50;
+const DEBOUNCE_MS = 300;
+
+// Module-level debounce state (outside Zustand to avoid serialization issues)
+let _debounceTimer: ReturnType<typeof setTimeout> | null = null;
+let _debounceSnapshot: EditConfig | null = null;
 
 function pushHistory(state: EditorState): Pick<EditorState, "editHistory" | "editFuture"> {
   if (!state.editConfig) return { editHistory: state.editHistory, editFuture: state.editFuture };
   const history = [...state.editHistory, state.editConfig].slice(-MAX_HISTORY);
   return { editHistory: history, editFuture: [] };
+}
+
+/** Clamp zoom anchor so the viewport doesn't exceed frame bounds.
+ *  halfViewport = 0.5 / scale; anchor = clamp(anchor, halfViewport, 1 - halfViewport) */
+function clampZoomAnchor(anchorX: number, anchorY: number, scale: number): { anchorX: number; anchorY: number } {
+  const half = 0.5 / scale;
+  return {
+    anchorX: Math.min(Math.max(anchorX, half), 1 - half),
+    anchorY: Math.min(Math.max(anchorY, half), 1 - half),
+  };
 }
 
 function syncCutsFromSegments(config: EditConfig, clipDuration: number): EditConfig {
@@ -191,7 +212,52 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     });
   },
 
+  updateEditConfigDebounced: (changes) => {
+    const state = get();
+    if (!state.editConfig) return;
+
+    // Capture pre-gesture snapshot on the FIRST call of a slider drag
+    if (!_debounceSnapshot) {
+      _debounceSnapshot = state.editConfig;
+    }
+
+    // Apply the change immediately (visual feedback) but don't push history yet
+    const clipDuration = state.clipEnd - state.clipStart;
+    let newConfig = { ...state.editConfig, ...changes };
+    if (changes.segments) {
+      newConfig = syncCutsFromSegments(newConfig, clipDuration);
+    }
+
+    // Reset debounce timer
+    if (_debounceTimer) clearTimeout(_debounceTimer);
+
+    _debounceTimer = setTimeout(() => {
+      // Gesture ended — commit the pre-gesture snapshot as a single undo entry
+      const current = get();
+      if (_debounceSnapshot && current.editConfig) {
+        const history = [...current.editHistory, _debounceSnapshot].slice(-MAX_HISTORY);
+        set({ editHistory: history, editFuture: [] });
+      }
+      _debounceSnapshot = null;
+      _debounceTimer = null;
+    }, DEBOUNCE_MS);
+
+    set({ editConfig: newConfig, isDirty: true });
+  },
+
   undo: () => {
+    // Flush any pending debounced gesture before undoing
+    if (_debounceTimer) {
+      clearTimeout(_debounceTimer);
+      _debounceTimer = null;
+    }
+    if (_debounceSnapshot) {
+      const state = get();
+      const history = [...state.editHistory, _debounceSnapshot].slice(-MAX_HISTORY);
+      set({ editHistory: history, editFuture: [] });
+      _debounceSnapshot = null;
+    }
+
     const { editHistory, editConfig, editFuture } = get();
     if (!editHistory.length || !editConfig) return;
 
@@ -205,6 +271,13 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   },
 
   redo: () => {
+    // Flush any pending debounced gesture before redoing
+    if (_debounceTimer) {
+      clearTimeout(_debounceTimer);
+      _debounceTimer = null;
+      _debounceSnapshot = null;
+    }
+
     const { editFuture, editConfig, editHistory } = get();
     if (!editFuture.length || !editConfig) return;
 
@@ -271,14 +344,15 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     if (!state.editConfig) return;
 
     const historyUpdate = pushHistory(state);
+    const { anchorX, anchorY } = clampZoomAnchor(0.5, 0.4, 1.15);
     const newZoom: ZoomConfig = {
       id: `z_${Date.now().toString(36)}`,
       time,
       duration: 0.5,
       scale: 1.15,
       easing: "ease_in_out",
-      anchorX: 0.5,
-      anchorY: 0.4,
+      anchorX,
+      anchorY,
       reason: "manual",
     };
 
@@ -295,9 +369,13 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     if (!state.editConfig) return;
 
     const historyUpdate = pushHistory(state);
-    const zooms = state.editConfig.zooms.map((z) =>
-      z.id === zoomId ? { ...z, ...changes } : z
-    );
+    const zooms = state.editConfig.zooms.map((z) => {
+      if (z.id !== zoomId) return z;
+      const merged = { ...z, ...changes };
+      // Re-clamp anchors whenever scale or anchor changes
+      const clamped = clampZoomAnchor(merged.anchorX, merged.anchorY, merged.scale);
+      return { ...merged, ...clamped };
+    });
 
     set({
       editConfig: { ...state.editConfig, zooms },
@@ -381,6 +459,74 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       editConfig: { ...state.editConfig, captions },
       ...historyUpdate,
       isDirty: true,
+    });
+  },
+
+  // ---- Annotation Actions ----
+
+  addAnnotation: (time) => {
+    const state = get();
+    if (!state.editConfig) return;
+
+    const historyUpdate = pushHistory(state);
+    const newAnnotation: AnnotationConfig = {
+      id: `ann_${Date.now().toString(36)}`,
+      type: "text",
+      content: "Text",
+      x: 50,
+      y: 50,
+      width: 20,
+      height: 5,
+      startTime: time,
+      endTime: Math.min(time + 3, state.clipEnd - state.clipStart),
+      style: {
+        fontFamily: "Inter",
+        fontSize: 32,
+        color: "#FFFFFF",
+        backgroundColor: null,
+        bold: true,
+        italic: false,
+        borderRadius: 4,
+      },
+    };
+
+    const annotations = [...(state.editConfig.annotations || []), newAnnotation];
+    set({
+      editConfig: { ...state.editConfig, annotations },
+      ...historyUpdate,
+      isDirty: true,
+      selectedElement: { type: "annotation", id: newAnnotation.id },
+    });
+  },
+
+  updateAnnotation: (id, changes) => {
+    const state = get();
+    if (!state.editConfig) return;
+
+    const historyUpdate = pushHistory(state);
+    const annotations = (state.editConfig.annotations || []).map((a) =>
+      a.id === id ? { ...a, ...changes } : a
+    );
+
+    set({
+      editConfig: { ...state.editConfig, annotations },
+      ...historyUpdate,
+      isDirty: true,
+    });
+  },
+
+  deleteAnnotation: (id) => {
+    const state = get();
+    if (!state.editConfig) return;
+
+    const historyUpdate = pushHistory(state);
+    const annotations = (state.editConfig.annotations || []).filter((a) => a.id !== id);
+
+    set({
+      editConfig: { ...state.editConfig, annotations },
+      ...historyUpdate,
+      isDirty: true,
+      selectedElement: state.selectedElement?.id === id ? null : state.selectedElement,
     });
   },
 }));

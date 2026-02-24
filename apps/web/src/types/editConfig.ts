@@ -47,6 +47,11 @@ export interface CaptionConfig {
   customKeywords: string[];
 }
 
+/**
+ * @deprecated Legacy transition config. Per-segment transitions are now managed
+ * via SegmentConfig.transition and SegmentConfig.transitionDuration.
+ * Retained for backward compatibility with existing saved configs.
+ */
 export interface TransitionConfig {
   intro: "none" | "fade_in" | "slide_up" | "zoom_in";
   outro: "none" | "fade_out" | "slide_down";
@@ -111,6 +116,34 @@ export interface CaptionOverride {
   highlight?: boolean;
 }
 
+export type AnnotationType = "text" | "sticker";
+
+export interface AnnotationStyle {
+  fontFamily: string;
+  fontSize: number; // px
+  color: string;
+  backgroundColor: string | null;
+  bold: boolean;
+  italic: boolean;
+  borderRadius: number;
+}
+
+export interface AnnotationConfig {
+  id: string;
+  type: AnnotationType;
+  content: string;
+  /** Position as percentage of video frame (0-100) */
+  x: number;
+  y: number;
+  /** Size as percentage of video frame */
+  width: number;
+  height: number;
+  /** Timing in output seconds (clip-relative) */
+  startTime: number;
+  endTime: number;
+  style: AnnotationStyle;
+}
+
 export interface EditConfig {
   outputRatio: OutputRatio;
   segments: SegmentConfig[];
@@ -118,8 +151,10 @@ export interface EditConfig {
   zooms: ZoomConfig[];
   reframing: ReframingConfig;
   captions: CaptionConfig;
+  /** @deprecated Use SegmentConfig.transition instead */
   transitions: TransitionConfig;
   audio: AudioConfig;
   overlays: OverlayConfig;
   captionOverrides: Record<number, CaptionOverride>;
+  annotations: AnnotationConfig[];
 }

@@ -130,47 +130,9 @@ export default function EditConfigPanel({
       </Section>
 
       <Section title={t("editor.transitions")} defaultOpen={false}>
-        <div className="space-y-3">
-          <div>
-            <label className="text-xs mb-2 block" style={{ color: "var(--text-muted)" }}>{t("editor.transitions.intro")}</label>
-            <select
-              value={config.transitions.intro}
-              onChange={(e) =>
-                updateConfig({
-                  transitions: {
-                    ...config.transitions,
-                    intro: e.target.value as EditConfig["transitions"]["intro"],
-                  },
-                })
-              }
-              className="input w-full text-sm"
-            >
-              <option value="none">{t("editor.transitions.none")}</option>
-              <option value="fade_in">{t("editor.transitions.fadeIn")}</option>
-              <option value="slide_up">{t("editor.transitions.slideUp")}</option>
-              <option value="zoom_in">{t("editor.transitions.zoomIn")}</option>
-            </select>
-          </div>
-          <div>
-            <label className="text-xs mb-2 block" style={{ color: "var(--text-muted)" }}>{t("editor.transitions.outro")}</label>
-            <select
-              value={config.transitions.outro}
-              onChange={(e) =>
-                updateConfig({
-                  transitions: {
-                    ...config.transitions,
-                    outro: e.target.value as EditConfig["transitions"]["outro"],
-                  },
-                })
-              }
-              className="input w-full text-sm"
-            >
-              <option value="none">{t("editor.transitions.none")}</option>
-              <option value="fade_out">{t("editor.transitions.fadeOut")}</option>
-              <option value="slide_down">{t("editor.transitions.slideDown")}</option>
-            </select>
-          </div>
-        </div>
+        <p className="text-xs" style={{ color: "var(--text-muted)" }}>
+          Select a segment in the timeline to configure its transition.
+        </p>
       </Section>
 
       <Section title={t("editor.audio")} defaultOpen={false}>

@@ -90,7 +90,15 @@ export default function AudioWaveform({ timelineZoom, onClick }: AudioWaveformPr
           peakData[i] = max;
         }
 
-        setPeaks(peakData);
+        // 3-sample moving average smoothing to reduce visual noise
+        const smoothed = new Float32Array(peakCount);
+        for (let i = 0; i < peakCount; i++) {
+          const prev = i > 0 ? peakData[i - 1] : peakData[i];
+          const next = i < peakCount - 1 ? peakData[i + 1] : peakData[i];
+          smoothed[i] = (prev + peakData[i] + next) / 3;
+        }
+
+        setPeaks(smoothed);
         setAudioDuration(audioBuffer.duration);
         audioCtx.close();
       } catch (err) {

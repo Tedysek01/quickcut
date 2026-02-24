@@ -92,7 +92,9 @@ class CaptionConfig(BaseModel):
 
 
 class TransitionConfig(BaseModel):
-    intro: str = "fade_in"
+    """Deprecated: Use SegmentConfig.transition instead.
+    Retained for backward compatibility with existing saved configs."""
+    intro: str = "none"
     outro: str = "none"
     betweenCuts: str = "hard"
 
@@ -139,6 +141,29 @@ class CaptionOverride(BaseModel):
     highlight: bool = False
 
 
+class AnnotationStyle(BaseModel):
+    fontFamily: str = "Inter"
+    fontSize: int = 48
+    color: str = "#FFFFFF"
+    backgroundColor: Optional[str] = None
+    bold: bool = False
+    italic: bool = False
+    borderRadius: int = 0
+
+
+class AnnotationConfig(BaseModel):
+    id: str
+    type: str = "text"  # "text" | "sticker"
+    content: str
+    x: float  # percentage 0-100
+    y: float
+    width: float
+    height: float
+    startTime: float
+    endTime: float
+    style: AnnotationStyle = AnnotationStyle()
+
+
 class EditConfig(BaseModel):
     outputRatio: str = "9:16"
     segments: List[SegmentConfig] = []
@@ -150,3 +175,4 @@ class EditConfig(BaseModel):
     audio: AudioConfig = AudioConfig()
     overlays: OverlayConfig = OverlayConfig()
     captionOverrides: dict = {}  # {wordIndex: CaptionOverride}
+    annotations: List[AnnotationConfig] = []

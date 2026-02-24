@@ -1,7 +1,7 @@
 "use client";
 
 import { useEditorStore } from "@/stores/editorStore";
-import type { EditConfig, SegmentConfig, SegmentTransition, ZoomConfig } from "@/types/editConfig";
+import type { EditConfig, SegmentConfig, SegmentTransition, ZoomConfig, AnnotationConfig } from "@/types/editConfig";
 import EditConfigPanel from "./EditConfigPanel";
 import CaptionEditor from "./CaptionEditor";
 import { Trash2, Clock, Zap, Move, ArrowRightLeft } from "lucide-react";
@@ -165,7 +165,7 @@ function SegmentProperties({ segment }: { segment: SegmentConfig }) {
                     ? { ...s, transitionDuration: parseFloat(e.target.value) }
                     : s
                 );
-                useEditorStore.getState().updateEditConfig({ segments });
+                useEditorStore.getState().updateEditConfigDebounced({ segments });
               }}
               className="flex-1 accent-[var(--accent)]"
             />
@@ -182,7 +182,7 @@ function SegmentProperties({ segment }: { segment: SegmentConfig }) {
 // ---- Zoom Properties ----
 
 function ZoomProperties({ zoom }: { zoom: ZoomConfig }) {
-  const { updateZoom, deleteZoom, selectElement } = useEditorStore();
+  const { updateZoom, deleteZoom, selectElement, updateEditConfigDebounced, editConfig } = useEditorStore();
 
   return (
     <div className="space-y-4">
@@ -221,7 +221,13 @@ function ZoomProperties({ zoom }: { zoom: ZoomConfig }) {
             max={2.0}
             step={0.05}
             value={zoom.scale}
-            onChange={(e) => updateZoom(zoom.id, { scale: parseFloat(e.target.value) })}
+            onChange={(e) => {
+              if (!editConfig) return;
+              const zooms = editConfig.zooms.map((z) =>
+                z.id === zoom.id ? { ...z, scale: parseFloat(e.target.value) } : z
+              );
+              updateEditConfigDebounced({ zooms });
+            }}
             className="flex-1 accent-[var(--accent)]"
           />
           <span className="text-xs font-mono tabular-nums w-10 text-right" style={{ color: "var(--text-secondary)" }}>
@@ -286,42 +292,61 @@ function ZoomProperties({ zoom }: { zoom: ZoomConfig }) {
         </select>
       </div>
 
-      {/* Anchor point */}
+      {/* Anchor point — dynamic bounds prevent viewport exceeding frame */}
       <div>
         <label className="text-[10px] uppercase tracking-wider block mb-1" style={{ color: "var(--text-disabled)" }}>
           <Move className="h-3 w-3 inline mr-1" />
           Anchor Point
         </label>
-        <div className="grid grid-cols-2 gap-3">
-          <div>
-            <label className="text-[10px] block mb-0.5" style={{ color: "var(--text-disabled)" }}>
-              X
-            </label>
-            <input
-              type="range"
-              min={0}
-              max={1}
-              step={0.05}
-              value={zoom.anchorX}
-              onChange={(e) => updateZoom(zoom.id, { anchorX: parseFloat(e.target.value) })}
-              className="w-full accent-[var(--accent)]"
-            />
-          </div>
-          <div>
-            <label className="text-[10px] block mb-0.5" style={{ color: "var(--text-disabled)" }}>
-              Y
-            </label>
-            <input
-              type="range"
-              min={0}
-              max={1}
-              step={0.05}
-              value={zoom.anchorY}
-              onChange={(e) => updateZoom(zoom.id, { anchorY: parseFloat(e.target.value) })}
-              className="w-full accent-[var(--accent)]"
-            />
-          </div>
-        </div>
+        {(() => {
+          const half = 0.5 / zoom.scale;
+          const anchorMin = Math.round(half * 100) / 100;
+          const anchorMax = Math.round((1 - half) * 100) / 100;
+          return (
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="text-[10px] block mb-0.5" style={{ color: "var(--text-disabled)" }}>
+                  X
+                </label>
+                <input
+                  type="range"
+                  min={anchorMin}
+                  max={anchorMax}
+                  step={0.05}
+                  value={zoom.anchorX}
+                  onChange={(e) => {
+                    if (!editConfig) return;
+                    const zooms = editConfig.zooms.map((z) =>
+                      z.id === zoom.id ? { ...z, anchorX: parseFloat(e.target.value) } : z
+                    );
+                    updateEditConfigDebounced({ zooms });
+                  }}
+                  className="w-full accent-[var(--accent)]"
+                />
+              </div>
+              <div>
+                <label className="text-[10px] block mb-0.5" style={{ color: "var(--text-disabled)" }}>
+                  Y
+                </label>
+                <input
+                  type="range"
+                  min={anchorMin}
+                  max={anchorMax}
+                  step={0.05}
+                  value={zoom.anchorY}
+                  onChange={(e) => {
+                    if (!editConfig) return;
+                    const zooms = editConfig.zooms.map((z) =>
+                      z.id === zoom.id ? { ...z, anchorY: parseFloat(e.target.value) } : z
+                    );
+                    updateEditConfigDebounced({ zooms });
+                  }}
+                  className="w-full accent-[var(--accent)]"
+                />
+              </div>
+            </div>
+          );
+        })()}
       </div>
 
       {/* Reason */}
@@ -333,6 +358,162 @@ function ZoomProperties({ zoom }: { zoom: ZoomConfig }) {
           {zoom.reason}
         </div>
       )}
+    </div>
+  );
+}
+
+// ---- Annotation Properties ----
+
+function AnnotationProperties({ annotation }: { annotation: AnnotationConfig }) {
+  const { updateAnnotation, deleteAnnotation, selectElement } = useEditorStore();
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <h3
+          className="text-xs font-semibold uppercase tracking-wider"
+          style={{ color: "var(--text-muted)" }}
+        >
+          Annotation
+        </h3>
+        <button
+          onClick={() => {
+            deleteAnnotation(annotation.id);
+            selectElement(null);
+          }}
+          className="p-1 rounded transition-colors"
+          style={{ color: "var(--error, #ef4444)" }}
+          onMouseEnter={(e) => (e.currentTarget.style.background = "var(--bg-elevated)")}
+          onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
+          title="Delete annotation"
+        >
+          <Trash2 className="h-3.5 w-3.5" />
+        </button>
+      </div>
+
+      {/* Content */}
+      <div>
+        <label className="text-[10px] uppercase tracking-wider block mb-1" style={{ color: "var(--text-disabled)" }}>
+          Text
+        </label>
+        <input
+          type="text"
+          value={annotation.content}
+          onChange={(e) => updateAnnotation(annotation.id, { content: e.target.value })}
+          className="input w-full text-xs"
+          placeholder="Enter text..."
+        />
+      </div>
+
+      {/* Timing */}
+      <div className="grid grid-cols-2 gap-3">
+        <div>
+          <label className="text-[10px] uppercase tracking-wider block mb-1" style={{ color: "var(--text-disabled)" }}>
+            Start
+          </label>
+          <input
+            type="number"
+            step={0.1}
+            min={0}
+            value={Number(annotation.startTime.toFixed(2))}
+            onChange={(e) => {
+              const val = parseFloat(e.target.value);
+              if (!isNaN(val)) updateAnnotation(annotation.id, { startTime: val });
+            }}
+            className="input w-full text-xs font-mono tabular-nums"
+          />
+        </div>
+        <div>
+          <label className="text-[10px] uppercase tracking-wider block mb-1" style={{ color: "var(--text-disabled)" }}>
+            End
+          </label>
+          <input
+            type="number"
+            step={0.1}
+            min={annotation.startTime + 0.1}
+            value={Number(annotation.endTime.toFixed(2))}
+            onChange={(e) => {
+              const val = parseFloat(e.target.value);
+              if (!isNaN(val)) updateAnnotation(annotation.id, { endTime: val });
+            }}
+            className="input w-full text-xs font-mono tabular-nums"
+          />
+        </div>
+      </div>
+
+      {/* Font size */}
+      <div>
+        <label className="text-[10px] uppercase tracking-wider block mb-1" style={{ color: "var(--text-disabled)" }}>
+          Font Size
+        </label>
+        <div className="flex items-center gap-2">
+          <input
+            type="range"
+            min={12}
+            max={80}
+            step={2}
+            value={annotation.style.fontSize}
+            onChange={(e) =>
+              updateAnnotation(annotation.id, {
+                style: { ...annotation.style, fontSize: parseInt(e.target.value) },
+              })
+            }
+            className="flex-1 accent-[var(--accent)]"
+          />
+          <span className="text-xs font-mono tabular-nums w-8 text-right" style={{ color: "var(--text-secondary)" }}>
+            {annotation.style.fontSize}
+          </span>
+        </div>
+      </div>
+
+      {/* Color */}
+      <div>
+        <label className="text-[10px] uppercase tracking-wider block mb-1" style={{ color: "var(--text-disabled)" }}>
+          Color
+        </label>
+        <input
+          type="color"
+          value={annotation.style.color}
+          onChange={(e) =>
+            updateAnnotation(annotation.id, {
+              style: { ...annotation.style, color: e.target.value },
+            })
+          }
+          className="w-8 h-6 rounded cursor-pointer"
+        />
+      </div>
+
+      {/* Bold / Italic toggles */}
+      <div className="flex gap-2">
+        <button
+          onClick={() =>
+            updateAnnotation(annotation.id, {
+              style: { ...annotation.style, bold: !annotation.style.bold },
+            })
+          }
+          className="px-3 py-1 rounded text-xs font-bold transition-all"
+          style={{
+            background: annotation.style.bold ? "var(--accent)" : "var(--bg-elevated)",
+            color: annotation.style.bold ? "#000" : "var(--text-secondary)",
+          }}
+        >
+          B
+        </button>
+        <button
+          onClick={() =>
+            updateAnnotation(annotation.id, {
+              style: { ...annotation.style, italic: !annotation.style.italic },
+            })
+          }
+          className="px-3 py-1 rounded text-xs italic transition-all"
+          style={{
+            background: annotation.style.italic ? "var(--accent)" : "var(--bg-elevated)",
+            color: annotation.style.italic ? "#000" : "var(--text-secondary)",
+          }}
+        >
+          I
+        </button>
+      </div>
     </div>
   );
 }
@@ -379,6 +560,17 @@ export default function PropertiesPanel({
             <div className="border-t pt-4" style={{ borderColor: "var(--border-subtle)" }}>
               <CaptionEditor />
             </div>
+          </div>
+        );
+      }
+    }
+
+    if (selectedElement.type === "annotation") {
+      const annotation = editConfig.annotations?.find((a) => a.id === selectedElement.id);
+      if (annotation) {
+        return (
+          <div className="card p-4 space-y-4">
+            <AnnotationProperties annotation={annotation} />
           </div>
         );
       }

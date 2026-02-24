@@ -4,6 +4,8 @@ import { useRef, useEffect, useState, useCallback } from "react";
 import { Play, Pause, Volume2, VolumeX, SkipBack, SkipForward } from "lucide-react";
 import { PlaybackEngine, type PlaybackState, type ActiveZoom, type CaptionGroup } from "@/lib/editor/PlaybackEngine";
 import CaptionOverlay from "@/components/editor/CaptionOverlay";
+import TransitionPreview from "@/components/editor/TransitionPreview";
+import AnnotationOverlay from "@/components/editor/AnnotationOverlay";
 import { useEditorStore } from "@/stores/editorStore";
 import type { EditConfig } from "@/types/editConfig";
 import type { Word } from "@/types/project";
@@ -201,7 +203,9 @@ export default function VideoPreview({ sourceUrl, renderedUrl, poster }: VideoPr
                     totalDuration: videoRef.current.duration || 0,
                     currentSegmentIndex: 0,
                     activeZoom: null,
+                    activeTransition: null,
                     activeCaptions: [],
+                    activeAnnotations: [],
                   });
                 }
               },
@@ -215,7 +219,9 @@ export default function VideoPreview({ sourceUrl, renderedUrl, poster }: VideoPr
                       totalDuration: 0,
                       currentSegmentIndex: 0,
                       activeZoom: null,
+                      activeTransition: null,
                       activeCaptions: [],
+                      activeAnnotations: [],
                     }),
                     totalDuration: videoRef.current!.duration,
                   }));
@@ -230,11 +236,28 @@ export default function VideoPreview({ sourceUrl, renderedUrl, poster }: VideoPr
           />
         </div>
 
+        {/* Transition preview overlay */}
+        {isNLEMode && (
+          <TransitionPreview
+            activeTransition={playbackState?.activeTransition ?? null}
+          />
+        )}
+
+        {/* Annotation overlay — z-[8], between transitions and captions */}
+        {isNLEMode && (playbackState?.activeAnnotations?.length ?? 0) > 0 && containerRef.current && (
+          <AnnotationOverlay
+            annotations={playbackState!.activeAnnotations}
+            containerWidth={containerRef.current.clientWidth}
+            containerHeight={containerRef.current.clientHeight}
+          />
+        )}
+
         {/* Caption overlay - only in NLE mode */}
         {isNLEMode && editConfig && (
           <CaptionOverlay
             activeCaptions={playbackState?.activeCaptions ?? []}
             config={editConfig.captions}
+            currentTime={playbackState?.outputTime ?? 0}
           />
         )}
       </div>

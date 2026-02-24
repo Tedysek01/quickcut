@@ -125,12 +125,8 @@ def generate_edit_config(
     # 4. Reframing
     reframing = ReframingConfig(enabled=True, mode="face_track")
 
-    # 5. Transitions
-    transitions = TransitionConfig(
-        intro="fade_in",
-        outro="none",
-        betweenCuts=preferences.get("transitionStyle", "hard") if preferences.get("transitionStyle") != "hard_cut" else "hard",
-    )
+    # 5. Transitions (legacy — per-segment transitions are now the primary system)
+    transitions = TransitionConfig()
 
     # 6. Audio
     audio = AudioConfig(normalizeVolume=True)
@@ -171,4 +167,5 @@ def generate_edit_config(
         audio=audio,
         overlays=overlays,
         captionOverrides={},
+        annotations=[],
     )
